@@ -32,25 +32,31 @@ export class SoblendBaileys {
   private reconnectAttempts: number = 0;
   private startTime: number = Date.now();
   private messageCount: number = 0;
+  private messageBuffer: Map<string, any> = new Map();
+  private connectionQuality: number = 100;
+  private lastPingTime: number = Date.now();
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private keepAliveInterval: NodeJS.Timeout | null = null;
+  private memoryMonitorInterval: NodeJS.Timeout | null = null;
 
   constructor(config: Partial<SoblendConfig> = {}) {
     this.config = {
       printQRInTerminal: config.printQRInTerminal ?? true,
       autoReconnect: config.autoReconnect ?? true,
-      maxReconnectAttempts: config.maxReconnectAttempts ?? 10,
-      reconnectDelay: config.reconnectDelay ?? 3000,
+      maxReconnectAttempts: config.maxReconnectAttempts ?? 20,
+      reconnectDelay: config.reconnectDelay ?? 1500,
       enableCache: config.enableCache ?? true,
-      cacheExpiry: config.cacheExpiry ?? 300000,
+      cacheExpiry: config.cacheExpiry ?? 600000,
       enableAntiSpam: config.enableAntiSpam ?? true,
       spamThreshold: config.spamThreshold ?? 5,
       spamTimeWindow: config.spamTimeWindow ?? 10000,
       enableRateLimit: config.enableRateLimit ?? true,
-      rateLimitMax: config.rateLimitMax ?? 30,
+      rateLimitMax: config.rateLimitMax ?? 50,
       rateLimitWindow: config.rateLimitWindow ?? 60000,
       enableCompression: config.enableCompression ?? true,
-      compressionQuality: config.compressionQuality ?? 80,
+      compressionQuality: config.compressionQuality ?? 85,
       enablePlugins: config.enablePlugins ?? true,
-      logLevel: config.logLevel ?? 'info',
+      logLevel: config.logLevel ?? 'error',
     };
 
     this.cache = new SmartCache(this.config.cacheExpiry);
@@ -58,8 +64,63 @@ export class SoblendBaileys {
     this.antiSpam = new AntiSpam(this.config.spamThreshold, this.config.spamTimeWindow);
     this.rateLimiter = new RateLimiter(this.config.rateLimitMax, this.config.rateLimitWindow);
     this.pluginManager = new PluginManager();
-    this.taskQueue = new TaskQueue(3);
-    this.throttler = new Throttler(1000);
+    this.taskQueue = new TaskQueue(5);
+    this.throttler = new Throttler(500);
+    
+    this.startMemoryMonitor();
+  }
+
+  private startMemoryMonitor(): void {
+    this.memoryMonitorInterval = setInterval(() => {
+      if (this.messageBuffer.size > 1000) {
+        const keysToDelete = Array.from(this.messageBuffer.keys()).slice(0, 500);
+        keysToDelete.forEach(key => this.messageBuffer.delete(key));
+      }
+      
+      if (global.gc && Math.random() < 0.1) {
+        global.gc();
+      }
+    }, 30000);
+  }
+
+  private async optimizedReconnect(authPath: string): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+
+    const backoffDelay = Math.min(
+      this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts),
+      15000
+    );
+
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect(authPath);
+      } catch (error) {
+        console.error('Reconnection failed:', error);
+      }
+    }, backoffDelay);
+  }
+
+  private startKeepAlive(): void {
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+    }
+
+    this.keepAliveInterval = setInterval(async () => {
+      if (this.socket) {
+        try {
+          const start = Date.now();
+          await this.socket.query({ tag: 'iq', attrs: { type: 'get', xmlns: 'w:p' } });
+          const latency = Date.now() - start;
+          
+          this.connectionQuality = Math.max(0, Math.min(100, 100 - latency / 10));
+          this.lastPingTime = Date.now();
+        } catch (error) {
+          this.connectionQuality = Math.max(0, this.connectionQuality - 10);
+        }
+      }
+    }, 25000);
   }
 
   async connect(authPath: string = 'auth_info'): Promise<SoblendSocket> {
@@ -89,24 +150,40 @@ export class SoblendBaileys {
     this.socket.ev.on('creds.update', saveCreds);
 
     this.socket.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect } = update;
+      const { connection, lastDisconnect, qr } = update;
+
+      if (qr && this.config.printQRInTerminal) {
+        console.log('Scan QR code to connect');
+      }
 
       if (connection === 'close') {
-        const shouldReconnect =
-          (lastDisconnect?.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+        if (this.keepAliveInterval) {
+          clearInterval(this.keepAliveInterval);
+          this.keepAliveInterval = null;
+        }
+
+        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
         if (shouldReconnect && this.config.autoReconnect) {
           if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
             this.reconnectAttempts++;
-            console.log(`Reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
-            setTimeout(() => this.connect(authPath), this.config.reconnectDelay);
+            console.log(`⚡ Fast reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
+            await this.optimizedReconnect(authPath);
           } else {
-            console.error('Max reconnection attempts reached');
+            console.error('❌ Max reconnection attempts reached');
           }
+        } else {
+          console.log('🔌 Logged out - stopping reconnection');
         }
+      } else if (connection === 'connecting') {
+        console.log('🔄 Connecting...');
       } else if (connection === 'open') {
         console.log('✅ Connected successfully to WhatsApp!');
         this.reconnectAttempts = 0;
+        this.connectionQuality = 100;
+        this.startKeepAlive();
+        
         if (this.config.enablePlugins) {
           await this.pluginManager.initializeAll(this.getEnhancedSocket());
         }
@@ -114,39 +191,51 @@ export class SoblendBaileys {
     });
 
     this.socket.ev.on('messages.upsert', async ({ messages, type }) => {
-      for (const msg of messages) {
-        if (!msg.message || msg.key.fromMe) continue;
+      const processingPromises = messages.map(async (msg) => {
+        if (!msg.message || msg.key.fromMe) return;
 
+        const msgId = msg.key.id || '';
+        if (this.messageBuffer.has(msgId)) return;
+
+        this.messageBuffer.set(msgId, true);
         this.messageCount++;
 
         const sender = msg.key.remoteJid || '';
 
         if (this.config.enableAntiSpam && this.antiSpam.checkSpam(sender)) {
-          console.log(`🚫 Spam detected from ${sender}`);
-          continue;
+          return;
         }
 
         if (this.config.enableRateLimit && !this.rateLimiter.checkLimit(sender)) {
-          console.log(`⏱️ Rate limit exceeded for ${sender}`);
-          continue;
+          return;
         }
 
         if (this.config.enableCache) {
-          this.cache.set(`msg:${msg.key.id}`, msg.message);
+          await this.taskQueue.add(
+            () => Promise.resolve(this.cache.set(`msg:${msgId}`, msg.message)),
+            { priority: 0 }
+          );
         }
 
         if (this.config.enablePlugins) {
-          await this.pluginManager.onMessage(msg);
+          await this.taskQueue.add(
+            async () => {
+              await this.pluginManager.onMessage(msg);
 
-          const text = msg.message.conversation || 
-                       msg.message.extendedTextMessage?.text || '';
-          
-          if (text.startsWith('!')) {
-            const [command, ...args] = text.slice(1).split(' ');
-            await this.pluginManager.onCommand(command, args, msg);
-          }
+              const text = msg.message?.conversation || 
+                           msg.message?.extendedTextMessage?.text || '';
+              
+              if (text.startsWith('!')) {
+                const [command, ...args] = text.slice(1).split(' ');
+                await this.pluginManager.onCommand(command, args, msg);
+              }
+            },
+            { priority: 1 }
+          );
         }
-      }
+      });
+
+      await Promise.allSettled(processingPromises);
     });
 
     return this.getEnhancedSocket();
@@ -164,62 +253,65 @@ export class SoblendBaileys {
         throw new Error('Buttons are required for interactive button messages');
       }
 
-      const buttonMessage: any = {
-        text: data.text || '',
-        footer: data.footer || '',
-        buttons: data.buttons.map((btn) => ({
-          buttonId: btn.buttonId,
-          buttonText: { displayText: btn.buttonText.displayText },
-          type: 1,
-        })),
-        headerType: data.headerType || 1,
-      };
+      const buttons = data.buttons.map((btn) => ({
+        name: 'quick_reply',
+        buttonParamsJson: JSON.stringify({
+          display_text: btn.buttonText.displayText,
+          id: btn.buttonId,
+        }),
+      }));
 
+      let imageBuffer: Buffer | undefined;
       if (data.image) {
-        const imageBuffer = typeof data.image === 'string' 
+        imageBuffer = typeof data.image === 'string' 
           ? await this.compressor.compressImage(data.image) 
           : data.image;
-        buttonMessage.image = imageBuffer;
-        buttonMessage.headerType = 4;
       }
 
-      if (data.video) {
-        buttonMessage.video = data.video;
-        buttonMessage.headerType = 5;
+      const interactiveMessage: any = {
+        body: proto.Message.InteractiveMessage.Body.create({
+          text: data.text || '',
+        }),
+        footer: proto.Message.InteractiveMessage.Footer.create({
+          text: data.footer || '',
+        }),
+        header: proto.Message.InteractiveMessage.Header.create({
+          title: data.title || '',
+          subtitle: '',
+          hasMediaAttachment: !!imageBuffer,
+        }),
+        nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+          buttons: buttons,
+        }),
+      };
+
+      if (imageBuffer) {
+        const mediaData = await prepareWAMessageMedia(
+          { image: imageBuffer },
+          { upload: this.socket!.waUploadToServer }
+        );
+        interactiveMessage.header = proto.Message.InteractiveMessage.Header.create({
+          title: data.title || '',
+          hasMediaAttachment: true,
+          imageMessage: mediaData.imageMessage,
+        });
       }
 
-      const message = generateWAMessageFromContent(jid, {
-        viewOnceMessage: {
-          message: {
-            messageContextInfo: {
-              deviceListMetadata: {},
-              deviceListMetadataVersion: 2,
+      const message = generateWAMessageFromContent(
+        jid,
+        {
+          viewOnceMessage: {
+            message: {
+              messageContextInfo: {
+                deviceListMetadata: {},
+                deviceListMetadataVersion: 2,
+              },
+              interactiveMessage: proto.Message.InteractiveMessage.create(interactiveMessage),
             },
-            interactiveMessage: proto.Message.InteractiveMessage.create({
-              body: proto.Message.InteractiveMessage.Body.create({
-                text: data.text || '',
-              }),
-              footer: proto.Message.InteractiveMessage.Footer.create({
-                text: data.footer || '',
-              }),
-              header: proto.Message.InteractiveMessage.Header.create({
-                title: '',
-                subtitle: '',
-                hasMediaAttachment: false,
-              }),
-              nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                buttons: data.buttons.map((btn) => ({
-                  name: 'quick_reply',
-                  buttonParamsJson: JSON.stringify({
-                    display_text: btn.buttonText.displayText,
-                    id: btn.buttonId,
-                  }),
-                })),
-              }),
-            }),
           },
         },
-      }, { userJid: jid });
+        { userJid: jid }
+      );
 
       return await this.socket!.relayMessage(jid, message.message!, {
         messageId: message.key.id!,
@@ -242,40 +334,44 @@ export class SoblendBaileys {
         })),
       }));
 
-      const message = generateWAMessageFromContent(jid, {
-        viewOnceMessage: {
-          message: {
-            messageContextInfo: {
-              deviceListMetadata: {},
-              deviceListMetadataVersion: 2,
+      const message = generateWAMessageFromContent(
+        jid,
+        {
+          viewOnceMessage: {
+            message: {
+              messageContextInfo: {
+                deviceListMetadata: {},
+                deviceListMetadataVersion: 2,
+              },
+              interactiveMessage: proto.Message.InteractiveMessage.create({
+                body: proto.Message.InteractiveMessage.Body.create({
+                  text: data.text || list.description || '',
+                }),
+                footer: proto.Message.InteractiveMessage.Footer.create({
+                  text: data.footer || '',
+                }),
+                header: proto.Message.InteractiveMessage.Header.create({
+                  title: list.title,
+                  subtitle: '',
+                  hasMediaAttachment: false,
+                }),
+                nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                  buttons: [
+                    {
+                      name: 'single_select',
+                      buttonParamsJson: JSON.stringify({
+                        title: list.buttonText,
+                        sections: sections,
+                      }),
+                    },
+                  ],
+                }),
+              }),
             },
-            interactiveMessage: proto.Message.InteractiveMessage.create({
-              body: proto.Message.InteractiveMessage.Body.create({
-                text: data.text || list.description || '',
-              }),
-              footer: proto.Message.InteractiveMessage.Footer.create({
-                text: data.footer || '',
-              }),
-              header: proto.Message.InteractiveMessage.Header.create({
-                title: list.title,
-                subtitle: '',
-                hasMediaAttachment: false,
-              }),
-              nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                buttons: [
-                  {
-                    name: 'single_select',
-                    buttonParamsJson: JSON.stringify({
-                      title: list.buttonText,
-                      sections: sections,
-                    }),
-                  },
-                ],
-              }),
-            }),
           },
         },
-      }, { userJid: jid });
+        { userJid: jid }
+      );
 
       return await this.socket!.relayMessage(jid, message.message!, {
         messageId: message.key.id!,
@@ -337,5 +433,32 @@ export class SoblendBaileys {
 
   getThrottler(): Throttler {
     return this.throttler;
+  }
+
+  getConnectionQuality(): number {
+    return this.connectionQuality;
+  }
+
+  getLastPingTime(): number {
+    return this.lastPingTime;
+  }
+
+  async cleanup(): Promise<void> {
+    if (this.keepAliveInterval) {
+      clearInterval(this.keepAliveInterval);
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+    }
+    if (this.memoryMonitorInterval) {
+      clearInterval(this.memoryMonitorInterval);
+    }
+    
+    this.messageBuffer.clear();
+    this.cache.clear();
+    
+    if (this.socket) {
+      this.socket.end(undefined);
+    }
   }
 }

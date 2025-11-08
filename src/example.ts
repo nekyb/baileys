@@ -52,7 +52,8 @@ async function main() {
         if (text.toLowerCase() === 'buttons') {
           logger.info('Enviando botones interactivos...');
           await socket.sendInteractiveButtons(sender, {
-            text: '¡Hola! Aquí tienes botones interactivos:',
+            title: 'Botones Interactivos',
+            text: '¡Hola! Estos son botones interactivos que funcionan correctamente',
             footer: 'Powered by @soblend/baileys',
             buttons: [
               {

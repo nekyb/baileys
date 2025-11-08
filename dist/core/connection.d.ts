@@ -16,7 +16,16 @@ export declare class SoblendBaileys {
     private reconnectAttempts;
     private startTime;
     private messageCount;
+    private messageBuffer;
+    private connectionQuality;
+    private lastPingTime;
+    private reconnectTimer;
+    private keepAliveInterval;
+    private memoryMonitorInterval;
     constructor(config?: Partial<SoblendConfig>);
+    private startMemoryMonitor;
+    private optimizedReconnect;
+    private startKeepAlive;
     connect(authPath?: string): Promise<SoblendSocket>;
     private getEnhancedSocket;
     getPluginManager(): PluginManager;
@@ -24,4 +33,7 @@ export declare class SoblendBaileys {
     getCompressor(): MediaCompressor;
     getTaskQueue(): TaskQueue;
     getThrottler(): Throttler;
+    getConnectionQuality(): number;
+    getLastPingTime(): number;
+    cleanup(): Promise<void>;
 }

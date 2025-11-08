@@ -1,6 +1,6 @@
 {
   "name": "@soblend/baileys",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Enhanced Baileys fork with interactive buttons, encrypted database (BSONLite), microservices orchestration (MykloreJS), advanced group management, and optimized performance",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

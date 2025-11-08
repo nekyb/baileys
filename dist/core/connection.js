@@ -58,32 +58,83 @@ class SoblendBaileys {
     reconnectAttempts = 0;
     startTime = Date.now();
     messageCount = 0;
+    messageBuffer = new Map();
+    connectionQuality = 100;
+    lastPingTime = Date.now();
+    reconnectTimer = null;
+    keepAliveInterval = null;
+    memoryMonitorInterval = null;
     constructor(config = {}) {
         this.config = {
             printQRInTerminal: config.printQRInTerminal ?? true,
             autoReconnect: config.autoReconnect ?? true,
-            maxReconnectAttempts: config.maxReconnectAttempts ?? 10,
-            reconnectDelay: config.reconnectDelay ?? 3000,
+            maxReconnectAttempts: config.maxReconnectAttempts ?? 20,
+            reconnectDelay: config.reconnectDelay ?? 1500,
             enableCache: config.enableCache ?? true,
-            cacheExpiry: config.cacheExpiry ?? 300000,
+            cacheExpiry: config.cacheExpiry ?? 600000,
             enableAntiSpam: config.enableAntiSpam ?? true,
             spamThreshold: config.spamThreshold ?? 5,
             spamTimeWindow: config.spamTimeWindow ?? 10000,
             enableRateLimit: config.enableRateLimit ?? true,
-            rateLimitMax: config.rateLimitMax ?? 30,
+            rateLimitMax: config.rateLimitMax ?? 50,
             rateLimitWindow: config.rateLimitWindow ?? 60000,
             enableCompression: config.enableCompression ?? true,
-            compressionQuality: config.compressionQuality ?? 80,
+            compressionQuality: config.compressionQuality ?? 85,
             enablePlugins: config.enablePlugins ?? true,
-            logLevel: config.logLevel ?? 'info',
+            logLevel: config.logLevel ?? 'error',
         };
         this.cache = new cache_1.SmartCache(this.config.cacheExpiry);
         this.compressor = new compression_1.MediaCompressor(this.config.compressionQuality);
         this.antiSpam = new anti_spam_1.AntiSpam(this.config.spamThreshold, this.config.spamTimeWindow);
         this.rateLimiter = new rate_limiter_1.RateLimiter(this.config.rateLimitMax, this.config.rateLimitWindow);
         this.pluginManager = new plugin_manager_1.PluginManager();
-        this.taskQueue = new task_queue_1.TaskQueue(3);
-        this.throttler = new task_queue_1.Throttler(1000);
+        this.taskQueue = new task_queue_1.TaskQueue(5);
+        this.throttler = new task_queue_1.Throttler(500);
+        this.startMemoryMonitor();
+    }
+    startMemoryMonitor() {
+        this.memoryMonitorInterval = setInterval(() => {
+            if (this.messageBuffer.size > 1000) {
+                const keysToDelete = Array.from(this.messageBuffer.keys()).slice(0, 500);
+                keysToDelete.forEach(key => this.messageBuffer.delete(key));
+            }
+            if (global.gc && Math.random() < 0.1) {
+                global.gc();
+            }
+        }, 30000);
+    }
+    async optimizedReconnect(authPath) {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+        }
+        const backoffDelay = Math.min(this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts), 15000);
+        this.reconnectTimer = setTimeout(async () => {
+            try {
+                await this.connect(authPath);
+            }
+            catch (error) {
+                console.error('Reconnection failed:', error);
+            }
+        }, backoffDelay);
+    }
+    startKeepAlive() {
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval);
+        }
+        this.keepAliveInterval = setInterval(async () => {
+            if (this.socket) {
+                try {
+                    const start = Date.now();
+                    await this.socket.query({ tag: 'iq', attrs: { type: 'get', xmlns: 'w:p' } });
+                    const latency = Date.now() - start;
+                    this.connectionQuality = Math.max(0, Math.min(100, 100 - latency / 10));
+                    this.lastPingTime = Date.now();
+                }
+                catch (error) {
+                    this.connectionQuality = Math.max(0, this.connectionQuality - 10);
+                }
+            }
+        }, 25000);
     }
     async connect(authPath = 'auth_info') {
         const { state, saveCreds } = await (0, baileys_1.useMultiFileAuthState)(authPath);
@@ -109,55 +160,76 @@ class SoblendBaileys {
         });
         this.socket.ev.on('creds.update', saveCreds);
         this.socket.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            const { connection, lastDisconnect, qr } = update;
+            if (qr && this.config.printQRInTerminal) {
+                console.log('Scan QR code to connect');
+            }
             if (connection === 'close') {
-                const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== baileys_1.DisconnectReason.loggedOut;
+                if (this.keepAliveInterval) {
+                    clearInterval(this.keepAliveInterval);
+                    this.keepAliveInterval = null;
+                }
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                const shouldReconnect = statusCode !== baileys_1.DisconnectReason.loggedOut;
                 if (shouldReconnect && this.config.autoReconnect) {
                     if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
                         this.reconnectAttempts++;
-                        console.log(`Reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
-                        setTimeout(() => this.connect(authPath), this.config.reconnectDelay);
+                        console.log(`⚡ Fast reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
+                        await this.optimizedReconnect(authPath);
                     }
                     else {
-                        console.error('Max reconnection attempts reached');
+                        console.error('❌ Max reconnection attempts reached');
                     }
                 }
+                else {
+                    console.log('🔌 Logged out - stopping reconnection');
+                }
+            }
+            else if (connection === 'connecting') {
+                console.log('🔄 Connecting...');
             }
             else if (connection === 'open') {
                 console.log('✅ Connected successfully to WhatsApp!');
                 this.reconnectAttempts = 0;
+                this.connectionQuality = 100;
+                this.startKeepAlive();
                 if (this.config.enablePlugins) {
                     await this.pluginManager.initializeAll(this.getEnhancedSocket());
                 }
             }
         });
         this.socket.ev.on('messages.upsert', async ({ messages, type }) => {
-            for (const msg of messages) {
+            const processingPromises = messages.map(async (msg) => {
                 if (!msg.message || msg.key.fromMe)
-                    continue;
+                    return;
+                const msgId = msg.key.id || '';
+                if (this.messageBuffer.has(msgId))
+                    return;
+                this.messageBuffer.set(msgId, true);
                 this.messageCount++;
                 const sender = msg.key.remoteJid || '';
                 if (this.config.enableAntiSpam && this.antiSpam.checkSpam(sender)) {
-                    console.log(`🚫 Spam detected from ${sender}`);
-                    continue;
+                    return;
                 }
                 if (this.config.enableRateLimit && !this.rateLimiter.checkLimit(sender)) {
-                    console.log(`⏱️ Rate limit exceeded for ${sender}`);
-                    continue;
+                    return;
                 }
                 if (this.config.enableCache) {
-                    this.cache.set(`msg:${msg.key.id}`, msg.message);
+                    await this.taskQueue.add(() => Promise.resolve(this.cache.set(`msg:${msgId}`, msg.message)), { priority: 0 });
                 }
                 if (this.config.enablePlugins) {
-                    await this.pluginManager.onMessage(msg);
-                    const text = msg.message.conversation ||
-                        msg.message.extendedTextMessage?.text || '';
-                    if (text.startsWith('!')) {
-                        const [command, ...args] = text.slice(1).split(' ');
-                        await this.pluginManager.onCommand(command, args, msg);
-                    }
+                    await this.taskQueue.add(async () => {
+                        await this.pluginManager.onMessage(msg);
+                        const text = msg.message?.conversation ||
+                            msg.message?.extendedTextMessage?.text || '';
+                        if (text.startsWith('!')) {
+                            const [command, ...args] = text.slice(1).split(' ');
+                            await this.pluginManager.onCommand(command, args, msg);
+                        }
+                    }, { priority: 1 });
                 }
-            }
+            });
+            await Promise.allSettled(processingPromises);
         });
         return this.getEnhancedSocket();
     }
@@ -170,26 +242,42 @@ class SoblendBaileys {
             if (!data.buttons || data.buttons.length === 0) {
                 throw new Error('Buttons are required for interactive button messages');
             }
-            const buttonMessage = {
-                text: data.text || '',
-                footer: data.footer || '',
-                buttons: data.buttons.map((btn) => ({
-                    buttonId: btn.buttonId,
-                    buttonText: { displayText: btn.buttonText.displayText },
-                    type: 1,
-                })),
-                headerType: data.headerType || 1,
-            };
+            const buttons = data.buttons.map((btn) => ({
+                name: 'quick_reply',
+                buttonParamsJson: JSON.stringify({
+                    display_text: btn.buttonText.displayText,
+                    id: btn.buttonId,
+                }),
+            }));
+            let imageBuffer;
             if (data.image) {
-                const imageBuffer = typeof data.image === 'string'
+                imageBuffer = typeof data.image === 'string'
                     ? await this.compressor.compressImage(data.image)
                     : data.image;
-                buttonMessage.image = imageBuffer;
-                buttonMessage.headerType = 4;
             }
-            if (data.video) {
-                buttonMessage.video = data.video;
-                buttonMessage.headerType = 5;
+            const interactiveMessage = {
+                body: baileys_1.proto.Message.InteractiveMessage.Body.create({
+                    text: data.text || '',
+                }),
+                footer: baileys_1.proto.Message.InteractiveMessage.Footer.create({
+                    text: data.footer || '',
+                }),
+                header: baileys_1.proto.Message.InteractiveMessage.Header.create({
+                    title: data.title || '',
+                    subtitle: '',
+                    hasMediaAttachment: !!imageBuffer,
+                }),
+                nativeFlowMessage: baileys_1.proto.Message.InteractiveMessage.NativeFlowMessage.create({
+                    buttons: buttons,
+                }),
+            };
+            if (imageBuffer) {
+                const mediaData = await (0, baileys_1.prepareWAMessageMedia)({ image: imageBuffer }, { upload: this.socket.waUploadToServer });
+                interactiveMessage.header = baileys_1.proto.Message.InteractiveMessage.Header.create({
+                    title: data.title || '',
+                    hasMediaAttachment: true,
+                    imageMessage: mediaData.imageMessage,
+                });
             }
             const message = (0, baileys_1.generateWAMessageFromContent)(jid, {
                 viewOnceMessage: {
@@ -198,28 +286,7 @@ class SoblendBaileys {
                             deviceListMetadata: {},
                             deviceListMetadataVersion: 2,
                         },
-                        interactiveMessage: baileys_1.proto.Message.InteractiveMessage.create({
-                            body: baileys_1.proto.Message.InteractiveMessage.Body.create({
-                                text: data.text || '',
-                            }),
-                            footer: baileys_1.proto.Message.InteractiveMessage.Footer.create({
-                                text: data.footer || '',
-                            }),
-                            header: baileys_1.proto.Message.InteractiveMessage.Header.create({
-                                title: '',
-                                subtitle: '',
-                                hasMediaAttachment: false,
-                            }),
-                            nativeFlowMessage: baileys_1.proto.Message.InteractiveMessage.NativeFlowMessage.create({
-                                buttons: data.buttons.map((btn) => ({
-                                    name: 'quick_reply',
-                                    buttonParamsJson: JSON.stringify({
-                                        display_text: btn.buttonText.displayText,
-                                        id: btn.buttonId,
-                                    }),
-                                })),
-                            }),
-                        }),
+                        interactiveMessage: baileys_1.proto.Message.InteractiveMessage.create(interactiveMessage),
                     },
                 },
             }, { userJid: jid });
@@ -324,6 +391,28 @@ class SoblendBaileys {
     }
     getThrottler() {
         return this.throttler;
+    }
+    getConnectionQuality() {
+        return this.connectionQuality;
+    }
+    getLastPingTime() {
+        return this.lastPingTime;
+    }
+    async cleanup() {
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval);
+        }
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+        }
+        if (this.memoryMonitorInterval) {
+            clearInterval(this.memoryMonitorInterval);
+        }
+        this.messageBuffer.clear();
+        this.cache.clear();
+        if (this.socket) {
+            this.socket.end(undefined);
+        }
     }
 }
 exports.SoblendBaileys = SoblendBaileys;

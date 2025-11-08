@@ -3,21 +3,43 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.SmartCache = void 0;
 class SmartCache {
     cache;
+    accessOrder = [];
+    maxSize;
     defaultExpiry;
     hits = 0;
     misses = 0;
-    constructor(defaultExpiry = 300000) {
+    evictions = 0;
+    constructor(defaultExpiry = 300000, maxSize = 2000) {
         this.cache = new Map();
+        this.maxSize = maxSize;
         this.defaultExpiry = defaultExpiry;
         this.startCleanup();
     }
+    evictLRU() {
+        if (this.cache.size >= this.maxSize && this.accessOrder.length > 0) {
+            const keyToEvict = this.accessOrder.shift();
+            if (keyToEvict) {
+                this.cache.delete(keyToEvict);
+                this.evictions++;
+            }
+        }
+    }
+    updateAccessOrder(key) {
+        const index = this.accessOrder.indexOf(key);
+        if (index > -1) {
+            this.accessOrder.splice(index, 1);
+        }
+        this.accessOrder.push(key);
+    }
     set(key, data, expiry) {
+        this.evictLRU();
         const entry = {
             data,
             timestamp: Date.now(),
             expiry: expiry || this.defaultExpiry,
         };
         this.cache.set(key, entry);
+        this.updateAccessOrder(key);
     }
     get(key) {
         const entry = this.cache.get(key);
@@ -27,9 +49,14 @@ class SmartCache {
         }
         if (Date.now() - entry.timestamp > entry.expiry) {
             this.cache.delete(key);
+            const index = this.accessOrder.indexOf(key);
+            if (index > -1) {
+                this.accessOrder.splice(index, 1);
+            }
             this.misses++;
             return null;
         }
+        this.updateAccessOrder(key);
         this.hits++;
         return entry.data;
     }
@@ -54,10 +81,18 @@ class SmartCache {
     getStats() {
         return {
             size: this.cache.size,
+            maxSize: this.maxSize,
             hits: this.hits,
             misses: this.misses,
+            evictions: this.evictions,
             hitRate: this.hits / (this.hits + this.misses) || 0,
         };
+    }
+    setMaxSize(size) {
+        this.maxSize = size;
+        while (this.cache.size > this.maxSize) {
+            this.evictLRU();
+        }
     }
     startCleanup() {
         setInterval(() => {

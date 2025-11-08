@@ -43,6 +43,7 @@ export interface InteractiveList {
 
 export interface InteractiveMessage {
   text?: string;
+  title?: string;
   footer?: string;
   buttons?: InteractiveButton[];
   listMessage?: InteractiveList;
