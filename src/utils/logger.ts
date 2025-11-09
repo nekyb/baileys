@@ -1,10 +1,11 @@
-
 import colors from '@imjxsx/colors';
+import { bold, dim, gray, green, magenta, red, white, yellow, cyan } from 'colorette'; // Import colorette functions
 
 export class SoblendLogger {
   private static instance: SoblendLogger;
   private startTime: number = Date.now();
   private animationFrame: number = 0;
+  private logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' = 'info'; // Default log level
 
   private constructor() {}
 
@@ -13,6 +14,22 @@ export class SoblendLogger {
       SoblendLogger.instance = new SoblendLogger();
     }
     return SoblendLogger.instance;
+  }
+
+  // Method to set the log level
+  setLogLevel(level: 'trace' | 'debug' | 'info' | 'warn' | 'error'): void {
+    this.logLevel = level;
+  }
+
+  // Helper to check if a log message should be displayed
+  private shouldLog(level: 'trace' | 'debug' | 'info' | 'warn' | 'error'): boolean {
+    const levels = ['trace', 'debug', 'info', 'warn', 'error'];
+    return levels.indexOf(level) >= levels.indexOf(this.logLevel);
+  }
+
+  // Helper to format timestamp
+  private formatTimestamp(): string {
+    return gray(`[${new Date().toLocaleTimeString('es-ES', { hour12: false })}]`);
   }
 
   printBanner(): void {
@@ -39,7 +56,7 @@ export class SoblendLogger {
       '║                                                                           ║',
       '╚═══════════════════════════════════════════════════════════════════════════╝',
     ];
-    
+
     lines.forEach((line, i) => {
       const colorIndex = Math.floor((i / lines.length) * gradient.length);
       console.log(colors.stylize(colors.fg256(gradient[colorIndex]), colors.styles.bright, line));
@@ -48,7 +65,7 @@ export class SoblendLogger {
 
   printFeatures(): void {
     console.log(colors.stylize(colors.fg256(51), colors.styles.bright, '\n⚡ CARACTERÍSTICAS LEGENDARIAS:\n'));
-    
+
     const features = [
       { icon: '🚀', text: 'Multi-Sesión Simultánea', color: colors.fg256(46), desc: 'Múltiples cuentas al mismo tiempo' },
       { icon: '🎯', text: 'Botones & Listas Nativas', color: colors.fg256(51), desc: 'UI interactiva mejorada' },
@@ -74,90 +91,73 @@ export class SoblendLogger {
     });
   }
 
-  success(message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.styles.bright,
-      colors.fg.green,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ✅ ${colors.stylize(colors.fg.green, 'SUCCESS')}: ${message}`
-    ));
-  }
-
-  error(message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.styles.bright,
-      colors.fg.red,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ❌ ${colors.stylize(colors.fg.red, 'ERROR')}: ${message}`
-    ));
-  }
-
-  warning(message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.styles.bright,
-      colors.fg.yellow,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ⚠️  ${colors.stylize(colors.fg.yellow, 'WARNING')}: ${message}`
-    ));
-  }
-
-  info(message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.fg.cyan,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ${colors.stylize(colors.fg.cyan, 'ℹ️  INFO')}: ${message}`
-    ));
+  trace(message: string): void {
+    if (!this.shouldLog('trace')) return;
+    console.log(`${this.formatTimestamp()} ${gray('[ TRACE ]')} ${dim(message)}`);
   }
 
   debug(message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.fg256(240),
-      `[${timestamp}] 🐛 DEBUG: ${message}`
-    ));
+    if (!this.shouldLog('debug')) return;
+    console.log(`${this.formatTimestamp()} ${magenta('[ DEBUG ]')} ${message}`);
   }
 
-  plugin(name: string, message: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    console.log(colors.stylize(
-      colors.fg256(141),
-      colors.styles.bright,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] 🔌 ${colors.stylize(colors.fg256(165), 'PLUGIN')} [${colors.stylize(colors.fg256(201), name)}]: ${message}`
-    ));
+  info(message: string): void {
+    if (!this.shouldLog('info')) return;
+    console.log(`${this.formatTimestamp()} ${cyan(bold('[ INFO ]'))} ${white(message)}`);
   }
 
-  connection(status: string, details?: string): void {
-    const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-    let color = colors.fg.cyan;
-    let icon = '🔗';
-    let statusColor = colors.fg.cyan;
-    
-    if (status === 'connected') {
-      color = colors.fg.green;
-      statusColor = colors.fg256(46);
-      icon = '✅';
-    } else if (status === 'disconnected') {
-      color = colors.fg.red;
-      statusColor = colors.fg256(196);
-      icon = '🔴';
-    } else if (status === 'connecting') {
-      color = colors.fg.yellow;
-      statusColor = colors.fg256(226);
-      icon = '🔄';
+  success(message: string): void {
+    if (!this.shouldLog('info')) return;
+    console.log(`${this.formatTimestamp()} ${green(bold('[ SUCCESS ]'))} ${white(message)}`);
+  }
+
+  warning(message: string): void {
+    if (!this.shouldLog('warn')) return;
+    console.log(`${this.formatTimestamp()} ${yellow(bold('[ WARN ]'))} ${white(message)}`);
+  }
+
+  error(message: string, error?: Error): void {
+    if (!this.shouldLog('error')) return;
+    console.error(`${this.formatTimestamp()} ${red(bold('[ ERROR ]'))} ${white(message)}`);
+    if (error && error.stack) {
+      console.error(dim(error.stack));
     }
+  }
 
-    console.log(colors.stylize(
-      colors.styles.bright,
-      color,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ${icon} ${colors.stylize(statusColor, 'CONNECTION')}: ${status.toUpperCase()}${details ? ' - ' + colors.stylize(colors.fg256(240), details) : ''}`
-    ));
+  connection(status: 'connected' | 'disconnected' | 'connecting' | 'error', details?: string): void {
+    if (!this.shouldLog('info')) return;
+
+    const icons = {
+      connected: '✅',
+      disconnected: '🔴',
+      connecting: '🔄',
+      error: '❌'
+    };
+
+    const coloretteColors = { // Renamed to avoid conflict with imported 'colors'
+      connected: green,
+      disconnected: red,
+      connecting: yellow,
+      error: red
+    };
+
+    const icon = icons[status];
+    const colorFn = coloretteColors[status];
+
+    const message = details
+      ? `${status.toUpperCase()} - ${dim(details)}`
+      : status.toUpperCase();
+
+    console.log(
+      `${this.formatTimestamp()} ${icon} ${colorFn(bold('[ CONNECTION ]'))} ${white(message)}`
+    );
   }
 
   session(sessionId: string, action: string, status: 'success' | 'error' | 'info'): void {
     const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
     let color = colors.fg.cyan;
     let icon = 'ℹ️';
-    
+
     if (status === 'success') {
       color = colors.fg256(46);
       icon = '✅';
@@ -178,10 +178,10 @@ export class SoblendLogger {
     const arrow = type === 'incoming' ? '📥' : '📤';
     const color = type === 'incoming' ? colors.fg256(51) : colors.fg256(141);
     const typeLabel = type === 'incoming' ? 'IN' : 'OUT';
-    
+
     console.log(colors.stylize(
       color,
-      `[${colors.stylize(colors.fg256(240), timestamp)}] ${arrow} ${colors.stylize(color, colors.styles.bright, typeLabel)} [${colors.stylize(colors.fg256(220), from.substring(0, 15))}]: ${colors.stylize(colors.fg256(255), text.substring(0, 50))}${text.length > 50 ? colors.stylize(colors.fg256(240), '...') : ''}`
+      `[${colors.stylize(colors.fg256(240), timestamp)}] ${arrow} ${colors.stylize(color, colors.styles.bright, typeLabel)} [${colors.stylize(colors.fg256(220), from.substring(0, 15))}] ${colors.stylize(colors.fg256(255), text.substring(0, 50))}${text.length > 50 ? colors.stylize(colors.fg256(240), '...') : ''}`
     ));
   }
 
@@ -189,7 +189,7 @@ export class SoblendLogger {
     console.log('\n' + colors.stylize(colors.fg256(201), colors.styles.bright, '╔══════════════════════════════════════════════════════╗'));
     console.log(colors.stylize(colors.fg256(201), colors.styles.bright, '║           📊 ESTADÍSTICAS DEL SISTEMA              ║'));
     console.log(colors.stylize(colors.fg256(201), colors.styles.bright, '╚══════════════════════════════════════════════════════╝\n'));
-    
+
     console.log(colors.stylize(colors.fg256(87), colors.styles.bright, `   ⏱️  Uptime:          ${colors.stylize(colors.fg256(255), this.formatUptime(Date.now() - this.startTime))}`));
     console.log(colors.stylize(colors.fg256(46), colors.styles.bright, `   💬 Mensajes:         ${colors.stylize(colors.fg256(255), stats.messageCount || 0)}`));
     console.log(colors.stylize(colors.fg256(226), colors.styles.bright, `   🚫 Spam Bloqueado:   ${colors.stylize(colors.fg256(255), stats.blockedSpam || 0)}`));
@@ -199,17 +199,17 @@ export class SoblendLogger {
 
   table(title: string, data: Array<{ label: string; value: any }>): void {
     console.log('\n' + colors.stylize(colors.fg.cyan, colors.styles.bright, `╔═══ 📋 ${title.toUpperCase()} ${'═'.repeat(Math.max(0, 50 - title.length))}╗`));
-    
+
     data.forEach(({ label, value }, index) => {
       const rowColor = index % 2 === 0 ? colors.fg256(255) : colors.fg256(250);
       const labelColor = colors.fg256(87);
-      console.log(colors.stylize(colors.fg256(240), '║ ') + 
-        colors.stylize(labelColor, colors.styles.bright, label.padEnd(25)) + 
-        colors.stylize(colors.fg256(240), ' │ ') + 
-        colors.stylize(rowColor, String(value).padEnd(30)) + 
+      console.log(colors.stylize(colors.fg256(240), '║ ') +
+        colors.stylize(labelColor, colors.styles.bright, label.padEnd(25)) +
+        colors.stylize(colors.fg256(240), ' │ ') +
+        colors.stylize(rowColor, String(value).padEnd(30)) +
         colors.stylize(colors.fg256(240), ' ║'));
     });
-    
+
     console.log(colors.stylize(colors.fg.cyan, '╚' + '═'.repeat(62) + '╝\n'));
   }
 
@@ -242,7 +242,7 @@ export class SoblendLogger {
       '║                                                                           ║',
       '╚═══════════════════════════════════════════════════════════════════════════╝',
     ];
-    
+
     footer.forEach(line => {
       console.log(colors.stylize(colors.fg256(201), colors.styles.bright, line));
     });

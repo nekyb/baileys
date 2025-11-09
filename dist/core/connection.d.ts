@@ -3,6 +3,7 @@ import { MediaCompressor } from '../utils/compression';
 import { PluginManager } from '../plugins/plugin-manager';
 import { TaskQueue, Throttler } from './task-queue';
 import { SoblendConfig, SoblendSocket } from '../types';
+import { PairingCodeManager, PairingCodeOptions } from './pairing-code';
 export declare class SoblendBaileys {
     private config;
     private socket;
@@ -13,6 +14,8 @@ export declare class SoblendBaileys {
     private pluginManager;
     private taskQueue;
     private throttler;
+    private pairingCodeManager;
+    private sessionManager;
     private reconnectAttempts;
     private startTime;
     private messageCount;
@@ -35,5 +38,7 @@ export declare class SoblendBaileys {
     getThrottler(): Throttler;
     getConnectionQuality(): number;
     getLastPingTime(): number;
+    requestPairingCode(options: PairingCodeOptions): Promise<string>;
+    getPairingCodeManager(): PairingCodeManager;
     cleanup(): Promise<void>;
 }

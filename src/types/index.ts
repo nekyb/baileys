@@ -17,6 +17,9 @@ export interface SoblendConfig {
   compressionQuality?: number;
   enablePlugins?: boolean;
   logLevel?: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+  enableSessionBackup?: boolean;
+  sessionBackupInterval?: number;
+  sessionEncryptionKey?: string;
 }
 
 export interface InteractiveButton {

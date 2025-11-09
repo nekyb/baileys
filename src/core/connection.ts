@@ -10,7 +10,7 @@ import makeWASocket, {
   prepareWAMessageMedia
 } from '@whiskeysockets/baileys';
 import { Boom } from '@hapi/boom';
-import P from 'pino';
+import { Logger } from '@imjxsx/logger';
 import { SmartCache } from '../utils/cache';
 import { MediaCompressor } from '../utils/compression';
 import { AntiSpam } from '../admin/anti-spam';
@@ -18,6 +18,8 @@ import { RateLimiter } from '../admin/rate-limiter';
 import { PluginManager } from '../plugins/plugin-manager';
 import { TaskQueue, Throttler } from './task-queue';
 import { SoblendConfig, SoblendSocket, InteractiveMessage, AdminStats } from '../types';
+import { PairingCodeManager, PairingCodeOptions } from './pairing-code';
+import { SessionManager, SessionBackupOptions } from './session-manager';
 
 export class SoblendBaileys {
   private config: Required<SoblendConfig>;
@@ -29,6 +31,8 @@ export class SoblendBaileys {
   private pluginManager: PluginManager;
   private taskQueue: TaskQueue;
   private throttler: Throttler;
+  private pairingCodeManager: PairingCodeManager;
+  private sessionManager: SessionManager;
   private reconnectAttempts: number = 0;
   private startTime: number = Date.now();
   private messageCount: number = 0;
@@ -66,6 +70,14 @@ export class SoblendBaileys {
     this.pluginManager = new PluginManager();
     this.taskQueue = new TaskQueue(5);
     this.throttler = new Throttler(500);
+    this.pairingCodeManager = new PairingCodeManager();
+    
+    const sessionBackupOptions: SessionBackupOptions = {
+      enableAutoBackup: config.enableSessionBackup ?? true,
+      backupInterval: config.sessionBackupInterval ?? 30,
+      encryptionKey: config.sessionEncryptionKey,
+    };
+    this.sessionManager = new SessionManager(sessionBackupOptions);
     
     this.startMemoryMonitor();
   }
@@ -83,21 +95,38 @@ export class SoblendBaileys {
     }, 30000);
   }
 
-  private async optimizedReconnect(authPath: string): Promise<void> {
+  private async optimizedReconnect(authPath: string, reason?: string): Promise<void> {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
     }
 
-    const backoffDelay = Math.min(
-      this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts),
-      15000
-    );
+    // Backoff exponencial más agresivo para reconexión rápida
+    let backoffDelay: number;
+    
+    if (reason === 'connection_lost' || reason === 'timeout') {
+      // Reconexión inmediata para pérdida de conexión
+      backoffDelay = Math.min(500, this.config.reconnectDelay);
+    } else if (reason === 'restart_required') {
+      // Delay mínimo para restart requerido
+      backoffDelay = Math.min(1000, this.config.reconnectDelay);
+    } else {
+      // Backoff exponencial para otros casos
+      backoffDelay = Math.min(
+        this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts),
+        15000
+      );
+    }
 
     this.reconnectTimer = setTimeout(async () => {
       try {
         await this.connect(authPath);
       } catch (error) {
         console.error('Reconnection failed:', error);
+        
+        // Reintentar con delay incrementado si falla
+        if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
+          await this.optimizedReconnect(authPath, 'retry');
+        }
       }
     }, backoffDelay);
   }
@@ -127,16 +156,20 @@ export class SoblendBaileys {
     const { state, saveCreds } = await useMultiFileAuthState(authPath);
     const { version } = await fetchLatestBaileysVersion();
 
-    const logger = P({ level: this.config.logLevel });
+    const logger = new Logger({
+      name: "WaSocket",
+      colorize: true,
+      level: "TRACE",
+    });
 
     this.socket = makeWASocket({
       version,
       auth: {
         creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
+        keys: makeCacheableSignalKeyStore(state.keys, logger as any),
       },
       printQRInTerminal: this.config.printQRInTerminal,
-      logger,
+      logger: logger as any,
       browser: Browsers.ubuntu('Soblend Baileys'),
       getMessage: async (key) => {
         if (this.config.enableCache) {
@@ -149,11 +182,14 @@ export class SoblendBaileys {
 
     this.socket.ev.on('creds.update', saveCreds);
 
+    // Configurar el manager de códigos de emparejamiento
+    this.pairingCodeManager.setSocket(this.socket);
+
     this.socket.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+      const { connection, lastDisconnect, qr, isNewLogin } = update;
 
       if (qr && this.config.printQRInTerminal) {
-        console.log('Scan QR code to connect');
+        console.log('📱 Scan QR code to connect');
       }
 
       if (connection === 'close') {
@@ -163,23 +199,70 @@ export class SoblendBaileys {
         }
 
         const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        const errorMessage = lastDisconnect?.error?.message || '';
+        
+        // Determinar el tipo de error y la estrategia de reconexión
+        let reconnectReason = 'unknown';
+        let shouldReconnect = true;
+
+        switch (statusCode) {
+          case DisconnectReason.loggedOut:
+            shouldReconnect = false;
+            console.log('🔌 Logged out - stopping reconnection');
+            break;
+            
+          case DisconnectReason.connectionLost:
+            reconnectReason = 'connection_lost';
+            console.log('📡 Connection lost - reconnecting instantly...');
+            break;
+            
+          case DisconnectReason.connectionClosed:
+            reconnectReason = 'connection_closed';
+            console.log('🔄 Connection closed - reconnecting...');
+            break;
+            
+          case DisconnectReason.timedOut:
+            reconnectReason = 'timeout';
+            console.log('⏱️  Connection timed out - reconnecting instantly...');
+            break;
+            
+          case DisconnectReason.restartRequired:
+            reconnectReason = 'restart_required';
+            console.log('🔁 Restart required - reconnecting...');
+            break;
+            
+          case DisconnectReason.badSession:
+            console.log('⚠️  Bad session - attempting recovery...');
+            reconnectReason = 'bad_session';
+            break;
+            
+          case DisconnectReason.connectionReplaced:
+            shouldReconnect = false;
+            console.log('🔄 Connection replaced by another device');
+            break;
+            
+          default:
+            console.log(`⚠️  Unknown disconnect (${statusCode}): ${errorMessage}`);
+        }
 
         if (shouldReconnect && this.config.autoReconnect) {
           if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
             this.reconnectAttempts++;
-            console.log(`⚡ Fast reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
-            await this.optimizedReconnect(authPath);
+            console.log(`⚡ Reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
+            await this.optimizedReconnect(authPath, reconnectReason);
           } else {
             console.error('❌ Max reconnection attempts reached');
           }
-        } else {
-          console.log('🔌 Logged out - stopping reconnection');
         }
       } else if (connection === 'connecting') {
-        console.log('🔄 Connecting...');
+        console.log('🔄 Connecting to WhatsApp...');
       } else if (connection === 'open') {
         console.log('✅ Connected successfully to WhatsApp!');
+        
+        if (isNewLogin) {
+          console.log('🆕 New login detected - session saved');
+        }
+        
         this.reconnectAttempts = 0;
         this.connectionQuality = 100;
         this.startKeepAlive();
@@ -441,6 +524,22 @@ export class SoblendBaileys {
 
   getLastPingTime(): number {
     return this.lastPingTime;
+  }
+
+  /**
+   * Solicita un código de emparejamiento de 8 dígitos
+   * @param options Opciones para generar el código
+   * @returns El código de emparejamiento formateado
+   */
+  async requestPairingCode(options: PairingCodeOptions): Promise<string> {
+    return await this.pairingCodeManager.requestPairingCode(options);
+  }
+
+  /**
+   * Obtiene el gestor de códigos de emparejamiento
+   */
+  getPairingCodeManager(): PairingCodeManager {
+    return this.pairingCodeManager;
   }
 
   async cleanup(): Promise<void> {

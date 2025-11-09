@@ -11,10 +11,12 @@ export { MicroserviceBridge } from './orchestration/service-bridge';
 export { TaskQueue, Throttler } from './core/task-queue';
 export { DashboardServer } from './dashboard/server';
 export { MultiSessionManager } from './core/multi-session';
+export { SessionManager } from './core/session-manager';
 export { StatusCapture } from './features/status-capture';
 export { DeletedMessageCapture } from './features/deleted-messages';
 export { AutoReplySystem } from './features/auto-reply';
 export { AutoUpdater } from './core/auto-updater';
+export { PairingCodeManager } from './core/pairing-code';
 export * from './types';
 
 export {

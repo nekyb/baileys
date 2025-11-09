@@ -444,32 +444,67 @@ class AdvancedGroupAdminManager {
     }
     async getAdmins(groupId) {
         try {
-            const participants = await this.getParticipants(groupId);
+            const metadata = await this.getGroupMetadata(groupId);
+            if (!metadata.success || !metadata.data) {
+                return [];
+            }
+            const participants = metadata.data.participants || [];
             return participants
                 .filter((p) => p.admin === 'admin' || p.admin === 'superadmin')
                 .map((p) => p.id);
         }
         catch (error) {
-            logger_1.logger.error(`Failed to get admins: ${error}`);
+            logger_1.logger.error(`Failed to get admins: ${error.message}`);
             return [];
         }
     }
     async isAdmin(groupId, jid) {
-        const admins = await this.getAdmins(groupId);
-        return admins.includes(jid);
+        try {
+            const metadata = await this.getGroupMetadata(groupId);
+            if (!metadata.success || !metadata.data) {
+                return false;
+            }
+            const normalizedJid = jid.replace(/:\d+/, '');
+            const participants = metadata.data.participants || [];
+            const participant = participants.find((p) => {
+                const participantJid = p.id.replace(/:\d+/, '');
+                return participantJid === normalizedJid;
+            });
+            return participant?.admin === 'admin' || participant?.admin === 'superadmin';
+        }
+        catch (error) {
+            logger_1.logger.error(`Failed to check admin status for ${jid}: ${error.message}`);
+            return false;
+        }
     }
     async isBotAdmin(groupId) {
         try {
             const metadata = await this.getGroupMetadata(groupId);
-            const botJid = this.socket.user?.id;
-            if (!botJid)
+            if (!metadata.success || !metadata.data) {
+                logger_1.logger.warn(`Failed to get metadata for ${groupId}`);
                 return false;
-            const participants = metadata.data?.participants || [];
-            const botParticipant = participants.find((p) => p.id === botJid);
-            return botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+            }
+            const botJid = this.socket.user?.id;
+            if (!botJid) {
+                logger_1.logger.warn('Bot JID not available');
+                return false;
+            }
+            const normalizedBotJid = botJid.replace(/:\d+/, '');
+            const participants = metadata.data.participants || [];
+            const botParticipant = participants.find((p) => {
+                const participantJid = p.id.replace(/:\d+/, '');
+                return participantJid === normalizedBotJid;
+            });
+            if (!botParticipant) {
+                logger_1.logger.warn(`Bot not found in group ${groupId} participants`);
+                return false;
+            }
+            const isAdmin = botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin';
+            logger_1.logger.debug(`Bot admin status in ${groupId}: ${isAdmin} (role: ${botParticipant.admin || 'member'})`);
+            return isAdmin;
         }
         catch (error) {
-            logger_1.logger.error(`Failed to check bot admin status: ${error}`);
+            logger_1.logger.error(`Failed to check bot admin status: ${error.message}`);
             return false;
         }
     }

@@ -5,16 +5,28 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.logger = exports.SoblendLogger = void 0;
 const colors_1 = __importDefault(require("@imjxsx/colors"));
+const colorette_1 = require("colorette");
 class SoblendLogger {
     static instance;
     startTime = Date.now();
     animationFrame = 0;
+    logLevel = 'info';
     constructor() { }
     static getInstance() {
         if (!SoblendLogger.instance) {
             SoblendLogger.instance = new SoblendLogger();
         }
         return SoblendLogger.instance;
+    }
+    setLogLevel(level) {
+        this.logLevel = level;
+    }
+    shouldLog(level) {
+        const levels = ['trace', 'debug', 'info', 'warn', 'error'];
+        return levels.indexOf(level) >= levels.indexOf(this.logLevel);
+    }
+    formatTimestamp() {
+        return (0, colorette_1.gray)(`[${new Date().toLocaleTimeString('es-ES', { hour12: false })}]`);
     }
     printBanner() {
         console.clear();
@@ -70,51 +82,60 @@ class SoblendLogger {
             console.log(colors_1.default.stylize(colors_1.default.fg256(240), `      └─ ${desc}`));
         });
     }
-    success(message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.styles.bright, colors_1.default.fg.green, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ✅ ${colors_1.default.stylize(colors_1.default.fg.green, 'SUCCESS')}: ${message}`));
-    }
-    error(message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.styles.bright, colors_1.default.fg.red, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ❌ ${colors_1.default.stylize(colors_1.default.fg.red, 'ERROR')}: ${message}`));
-    }
-    warning(message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.styles.bright, colors_1.default.fg.yellow, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ⚠️  ${colors_1.default.stylize(colors_1.default.fg.yellow, 'WARNING')}: ${message}`));
-    }
-    info(message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.fg.cyan, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ${colors_1.default.stylize(colors_1.default.fg.cyan, 'ℹ️  INFO')}: ${message}`));
+    trace(message) {
+        if (!this.shouldLog('trace'))
+            return;
+        console.log(`${this.formatTimestamp()} ${(0, colorette_1.gray)('[ TRACE ]')} ${(0, colorette_1.dim)(message)}`);
     }
     debug(message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.fg256(240), `[${timestamp}] 🐛 DEBUG: ${message}`));
+        if (!this.shouldLog('debug'))
+            return;
+        console.log(`${this.formatTimestamp()} ${(0, colorette_1.magenta)('[ DEBUG ]')} ${message}`);
     }
-    plugin(name, message) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        console.log(colors_1.default.stylize(colors_1.default.fg256(141), colors_1.default.styles.bright, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] 🔌 ${colors_1.default.stylize(colors_1.default.fg256(165), 'PLUGIN')} [${colors_1.default.stylize(colors_1.default.fg256(201), name)}]: ${message}`));
+    info(message) {
+        if (!this.shouldLog('info'))
+            return;
+        console.log(`${this.formatTimestamp()} ${(0, colorette_1.cyan)((0, colorette_1.bold)('[ INFO ]'))} ${(0, colorette_1.white)(message)}`);
+    }
+    success(message) {
+        if (!this.shouldLog('info'))
+            return;
+        console.log(`${this.formatTimestamp()} ${(0, colorette_1.green)((0, colorette_1.bold)('[ SUCCESS ]'))} ${(0, colorette_1.white)(message)}`);
+    }
+    warning(message) {
+        if (!this.shouldLog('warn'))
+            return;
+        console.log(`${this.formatTimestamp()} ${(0, colorette_1.yellow)((0, colorette_1.bold)('[ WARN ]'))} ${(0, colorette_1.white)(message)}`);
+    }
+    error(message, error) {
+        if (!this.shouldLog('error'))
+            return;
+        console.error(`${this.formatTimestamp()} ${(0, colorette_1.red)((0, colorette_1.bold)('[ ERROR ]'))} ${(0, colorette_1.white)(message)}`);
+        if (error && error.stack) {
+            console.error((0, colorette_1.dim)(error.stack));
+        }
     }
     connection(status, details) {
-        const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
-        let color = colors_1.default.fg.cyan;
-        let icon = '🔗';
-        let statusColor = colors_1.default.fg.cyan;
-        if (status === 'connected') {
-            color = colors_1.default.fg.green;
-            statusColor = colors_1.default.fg256(46);
-            icon = '✅';
-        }
-        else if (status === 'disconnected') {
-            color = colors_1.default.fg.red;
-            statusColor = colors_1.default.fg256(196);
-            icon = '🔴';
-        }
-        else if (status === 'connecting') {
-            color = colors_1.default.fg.yellow;
-            statusColor = colors_1.default.fg256(226);
-            icon = '🔄';
-        }
-        console.log(colors_1.default.stylize(colors_1.default.styles.bright, color, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ${icon} ${colors_1.default.stylize(statusColor, 'CONNECTION')}: ${status.toUpperCase()}${details ? ' - ' + colors_1.default.stylize(colors_1.default.fg256(240), details) : ''}`));
+        if (!this.shouldLog('info'))
+            return;
+        const icons = {
+            connected: '✅',
+            disconnected: '🔴',
+            connecting: '🔄',
+            error: '❌'
+        };
+        const coloretteColors = {
+            connected: colorette_1.green,
+            disconnected: colorette_1.red,
+            connecting: colorette_1.yellow,
+            error: colorette_1.red
+        };
+        const icon = icons[status];
+        const colorFn = coloretteColors[status];
+        const message = details
+            ? `${status.toUpperCase()} - ${(0, colorette_1.dim)(details)}`
+            : status.toUpperCase();
+        console.log(`${this.formatTimestamp()} ${icon} ${colorFn((0, colorette_1.bold)('[ CONNECTION ]'))} ${(0, colorette_1.white)(message)}`);
     }
     session(sessionId, action, status) {
         const timestamp = new Date().toLocaleTimeString('es-ES', { hour12: false });
@@ -135,7 +156,7 @@ class SoblendLogger {
         const arrow = type === 'incoming' ? '📥' : '📤';
         const color = type === 'incoming' ? colors_1.default.fg256(51) : colors_1.default.fg256(141);
         const typeLabel = type === 'incoming' ? 'IN' : 'OUT';
-        console.log(colors_1.default.stylize(color, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ${arrow} ${colors_1.default.stylize(color, colors_1.default.styles.bright, typeLabel)} [${colors_1.default.stylize(colors_1.default.fg256(220), from.substring(0, 15))}]: ${colors_1.default.stylize(colors_1.default.fg256(255), text.substring(0, 50))}${text.length > 50 ? colors_1.default.stylize(colors_1.default.fg256(240), '...') : ''}`));
+        console.log(colors_1.default.stylize(color, `[${colors_1.default.stylize(colors_1.default.fg256(240), timestamp)}] ${arrow} ${colors_1.default.stylize(color, colors_1.default.styles.bright, typeLabel)} [${colors_1.default.stylize(colors_1.default.fg256(220), from.substring(0, 15))}] ${colors_1.default.stylize(colors_1.default.fg256(255), text.substring(0, 50))}${text.length > 50 ? colors_1.default.stylize(colors_1.default.fg256(240), '...') : ''}`));
     }
     stats(stats) {
         console.log('\n' + colors_1.default.stylize(colors_1.default.fg256(201), colors_1.default.styles.bright, '╔══════════════════════════════════════════════════════╗'));

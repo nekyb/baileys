@@ -32,19 +32,18 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SoblendBaileys = void 0;
 const baileys_1 = __importStar(require("@whiskeysockets/baileys"));
-const pino_1 = __importDefault(require("pino"));
+const logger_1 = require("@imjxsx/logger");
 const cache_1 = require("../utils/cache");
 const compression_1 = require("../utils/compression");
 const anti_spam_1 = require("../admin/anti-spam");
 const rate_limiter_1 = require("../admin/rate-limiter");
 const plugin_manager_1 = require("../plugins/plugin-manager");
 const task_queue_1 = require("./task-queue");
+const pairing_code_1 = require("./pairing-code");
+const session_manager_1 = require("./session-manager");
 class SoblendBaileys {
     config;
     socket = null;
@@ -55,6 +54,8 @@ class SoblendBaileys {
     pluginManager;
     taskQueue;
     throttler;
+    pairingCodeManager;
+    sessionManager;
     reconnectAttempts = 0;
     startTime = Date.now();
     messageCount = 0;
@@ -90,6 +91,13 @@ class SoblendBaileys {
         this.pluginManager = new plugin_manager_1.PluginManager();
         this.taskQueue = new task_queue_1.TaskQueue(5);
         this.throttler = new task_queue_1.Throttler(500);
+        this.pairingCodeManager = new pairing_code_1.PairingCodeManager();
+        const sessionBackupOptions = {
+            enableAutoBackup: config.enableSessionBackup ?? true,
+            backupInterval: config.sessionBackupInterval ?? 30,
+            encryptionKey: config.sessionEncryptionKey,
+        };
+        this.sessionManager = new session_manager_1.SessionManager(sessionBackupOptions);
         this.startMemoryMonitor();
     }
     startMemoryMonitor() {
@@ -103,17 +111,29 @@ class SoblendBaileys {
             }
         }, 30000);
     }
-    async optimizedReconnect(authPath) {
+    async optimizedReconnect(authPath, reason) {
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
         }
-        const backoffDelay = Math.min(this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts), 15000);
+        let backoffDelay;
+        if (reason === 'connection_lost' || reason === 'timeout') {
+            backoffDelay = Math.min(500, this.config.reconnectDelay);
+        }
+        else if (reason === 'restart_required') {
+            backoffDelay = Math.min(1000, this.config.reconnectDelay);
+        }
+        else {
+            backoffDelay = Math.min(this.config.reconnectDelay * Math.pow(1.5, this.reconnectAttempts), 15000);
+        }
         this.reconnectTimer = setTimeout(async () => {
             try {
                 await this.connect(authPath);
             }
             catch (error) {
                 console.error('Reconnection failed:', error);
+                if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
+                    await this.optimizedReconnect(authPath, 'retry');
+                }
             }
         }, backoffDelay);
     }
@@ -139,7 +159,11 @@ class SoblendBaileys {
     async connect(authPath = 'auth_info') {
         const { state, saveCreds } = await (0, baileys_1.useMultiFileAuthState)(authPath);
         const { version } = await (0, baileys_1.fetchLatestBaileysVersion)();
-        const logger = (0, pino_1.default)({ level: this.config.logLevel });
+        const logger = new logger_1.Logger({
+            name: "WaSocket",
+            colorize: true,
+            level: "TRACE",
+        });
         this.socket = (0, baileys_1.default)({
             version,
             auth: {
@@ -147,7 +171,7 @@ class SoblendBaileys {
                 keys: (0, baileys_1.makeCacheableSignalKeyStore)(state.keys, logger),
             },
             printQRInTerminal: this.config.printQRInTerminal,
-            logger,
+            logger: logger,
             browser: baileys_1.Browsers.ubuntu('Soblend Baileys'),
             getMessage: async (key) => {
                 if (this.config.enableCache) {
@@ -159,10 +183,11 @@ class SoblendBaileys {
             },
         });
         this.socket.ev.on('creds.update', saveCreds);
+        this.pairingCodeManager.setSocket(this.socket);
         this.socket.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, qr } = update;
+            const { connection, lastDisconnect, qr, isNewLogin } = update;
             if (qr && this.config.printQRInTerminal) {
-                console.log('Scan QR code to connect');
+                console.log('📱 Scan QR code to connect');
             }
             if (connection === 'close') {
                 if (this.keepAliveInterval) {
@@ -170,26 +195,60 @@ class SoblendBaileys {
                     this.keepAliveInterval = null;
                 }
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
-                const shouldReconnect = statusCode !== baileys_1.DisconnectReason.loggedOut;
+                const errorMessage = lastDisconnect?.error?.message || '';
+                let reconnectReason = 'unknown';
+                let shouldReconnect = true;
+                switch (statusCode) {
+                    case baileys_1.DisconnectReason.loggedOut:
+                        shouldReconnect = false;
+                        console.log('🔌 Logged out - stopping reconnection');
+                        break;
+                    case baileys_1.DisconnectReason.connectionLost:
+                        reconnectReason = 'connection_lost';
+                        console.log('📡 Connection lost - reconnecting instantly...');
+                        break;
+                    case baileys_1.DisconnectReason.connectionClosed:
+                        reconnectReason = 'connection_closed';
+                        console.log('🔄 Connection closed - reconnecting...');
+                        break;
+                    case baileys_1.DisconnectReason.timedOut:
+                        reconnectReason = 'timeout';
+                        console.log('⏱️  Connection timed out - reconnecting instantly...');
+                        break;
+                    case baileys_1.DisconnectReason.restartRequired:
+                        reconnectReason = 'restart_required';
+                        console.log('🔁 Restart required - reconnecting...');
+                        break;
+                    case baileys_1.DisconnectReason.badSession:
+                        console.log('⚠️  Bad session - attempting recovery...');
+                        reconnectReason = 'bad_session';
+                        break;
+                    case baileys_1.DisconnectReason.connectionReplaced:
+                        shouldReconnect = false;
+                        console.log('🔄 Connection replaced by another device');
+                        break;
+                    default:
+                        console.log(`⚠️  Unknown disconnect (${statusCode}): ${errorMessage}`);
+                }
                 if (shouldReconnect && this.config.autoReconnect) {
                     if (this.reconnectAttempts < this.config.maxReconnectAttempts) {
                         this.reconnectAttempts++;
-                        console.log(`⚡ Fast reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
-                        await this.optimizedReconnect(authPath);
+                        console.log(`⚡ Reconnecting... Attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts}`);
+                        await this.optimizedReconnect(authPath, reconnectReason);
                     }
                     else {
                         console.error('❌ Max reconnection attempts reached');
                     }
                 }
-                else {
-                    console.log('🔌 Logged out - stopping reconnection');
-                }
             }
             else if (connection === 'connecting') {
-                console.log('🔄 Connecting...');
+                console.log('🔄 Connecting to WhatsApp...');
             }
             else if (connection === 'open') {
                 console.log('✅ Connected successfully to WhatsApp!');
+                if (isNewLogin) {
+                    console.log('🆕 New login detected - session saved');
+                }
                 this.reconnectAttempts = 0;
                 this.connectionQuality = 100;
                 this.startKeepAlive();
@@ -397,6 +456,12 @@ class SoblendBaileys {
     }
     getLastPingTime() {
         return this.lastPingTime;
+    }
+    async requestPairingCode(options) {
+        return await this.pairingCodeManager.requestPairingCode(options);
+    }
+    getPairingCodeManager() {
+        return this.pairingCodeManager;
     }
     async cleanup() {
         if (this.keepAliveInterval) {
